@@ -221,6 +221,51 @@ func (s *SQLServer) Gather(acc telegraf.Accumulator) error {
 	var wg sync.WaitGroup
 
 	for _, pool := range s.pools {
+		// execute query
+		rows, err := pool.Query("SELECT @@SERVERNAME AS [sql_instance], DB_NAME() AS [database_name]")
+		if err != nil {
+			return fmt.Errorf("Pre-script failed: %w", err)
+			//return   err
+		}
+
+		// grab the column information from the result
+		columns, err := rows.Columns()
+		if err != nil {
+			return fmt.Errorf("Pre-script columns failed: %w", err)
+			return err
+		}
+
+		for rows.Next() {
+			// err = s.accRow(query, acc, rows)
+			var columnVars []interface{}
+
+			// store the column name with its *interface{}
+			columnMap := make(map[string]*interface{})
+			for _, column := range columns {
+				columnMap[column] = new(interface{})
+			}
+			// populate the array of interface{} with the pointers in the right order
+			for i := 0; i < len(columnMap); i++ {
+				columnVars = append(columnVars, columnMap[columns[i]])
+			}
+			// deconstruct array of variables and send to Scan
+			err := rows.Scan(columnVars...)
+			if err != nil {
+				return fmt.Errorf("Pre-script scan failed: %w", err)
+				return err
+			}
+
+			for header, val := range columnMap {
+				if str, ok := (*val).(string); ok {
+					log.Printf("I! [inputs.sqlserver] About to query %s = %s", header, str)
+				} else {
+					log.Printf("I! [inputs.sqlserver] About to query %s is not a string", header)
+				}
+			}
+		}
+		rows.Close()
+
+
 		for _, query := range s.queries {
 			wg.Add(1)
 			go func(pool *sql.DB, query Query) {
