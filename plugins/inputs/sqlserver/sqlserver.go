@@ -21,8 +21,8 @@ type SQLServer struct {
 	DatabaseType  string   `toml:"database_type"`
 	IncludeQuery  []string `toml:"include_query"`
 	ExcludeQuery  []string `toml:"exclude_query"`
+	pools         []*sql.DB
 	queries       MapQuery
-	isInitialized bool
 }
 
 // Query struct
@@ -203,8 +203,6 @@ func initQueries(s *SQLServer) error {
 		}
 	}
 
-	// Set a flag so we know that queries have already been initialized
-	s.isInitialized = true
 	var querylist []string
 	for query := range queries {
 		querylist = append(querylist, query)
@@ -216,26 +214,19 @@ func initQueries(s *SQLServer) error {
 
 // Gather collect data from SQL Server
 func (s *SQLServer) Gather(acc telegraf.Accumulator) error {
-	if !s.isInitialized {
-		if err := initQueries(s); err != nil {
-			acc.AddError(err)
-			return err
-		}
-	}
-
 	if len(s.Servers) == 0 {
 		s.Servers = append(s.Servers, defaultServer)
 	}
 
 	var wg sync.WaitGroup
 
-	for _, serv := range s.Servers {
+	for _, pool := range s.pools {
 		for _, query := range s.queries {
 			wg.Add(1)
-			go func(serv string, query Query) {
+			go func(pool *sql.DB, query Query) {
 				defer wg.Done()
-				acc.AddError(s.gatherServer(serv, query, acc))
-			}(serv, query)
+				acc.AddError(s.gatherServer(pool, query, acc))
+			}(pool, query)
 		}
 	}
 
@@ -243,16 +234,32 @@ func (s *SQLServer) Gather(acc telegraf.Accumulator) error {
 	return nil
 }
 
-func (s *SQLServer) gatherServer(server string, query Query, acc telegraf.Accumulator) error {
-	// deferred opening
-	conn, err := sql.Open("mssql", server)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
+// Start initialize a list of connection pools
+func (s *SQLServer) Start(ac telegraf.Accumulator) error {
+	initQueries(s)
 
+	for _, serv := range s.Servers {
+		pool, err := sql.Open("mssql", serv)
+		if err != nil {
+			return err
+		}
+
+		s.pools = append(s.pools, pool)
+	}
+
+	return nil
+}
+
+// Stop cleanup server connection pools
+func (s *SQLServer) Stop() {
+	for _, pool := range s.pools {
+		pool.Close()
+	}
+}
+
+func (s *SQLServer) gatherServer(pool *sql.DB, query Query, acc telegraf.Accumulator) error {
 	// execute query
-	rows, err := conn.Query(query.Script)
+	rows, err := pool.Query(query.Script)
 	if err != nil {
 		return fmt.Errorf("Script %s failed: %w", query.ScriptName, err)
 		//return   err
@@ -327,6 +334,8 @@ func (s *SQLServer) accRow(query Query, acc telegraf.Accumulator, row scanner) e
 
 func init() {
 	inputs.Add("sqlserver", func() telegraf.Input {
-		return &SQLServer{}
+		return &SQLServer{
+			Servers: []string{defaultServer},
+		}
 	})
 }
